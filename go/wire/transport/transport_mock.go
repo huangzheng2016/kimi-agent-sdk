@@ -114,3 +114,33 @@ func (mr *MockTransportMockRecorder) Request(request any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Request", reflect.TypeOf((*MockTransport)(nil).Request), request)
 }
+
+// SetPlanMode mocks base method.
+func (m *MockTransport) SetPlanMode(params *wire.SetPlanModeParams) (*wire.SetPlanModeResult, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetPlanMode", params)
+	ret0, _ := ret[0].(*wire.SetPlanModeResult)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// SetPlanMode indicates an expected call of SetPlanMode.
+func (mr *MockTransportMockRecorder) SetPlanMode(params any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetPlanMode", reflect.TypeOf((*MockTransport)(nil).SetPlanMode), params)
+}
+
+// Steer mocks base method.
+func (m *MockTransport) Steer(params *wire.SteerParams) (*wire.SteerResult, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Steer", params)
+	ret0, _ := ret[0].(*wire.SteerResult)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Steer indicates an expected call of Steer.
+func (mr *MockTransportMockRecorder) Steer(params any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Steer", reflect.TypeOf((*MockTransport)(nil).Steer), params)
+}

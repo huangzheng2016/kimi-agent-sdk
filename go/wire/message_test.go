@@ -23,6 +23,12 @@ var (
 	_ Message = ApprovalRequestResolved{}
 	_ Message = ApprovalResponse{}
 	_ Message = ApprovalRequest{}
+	_ Message = HookTriggered{}
+	_ Message = HookResolved{}
+	_ Message = SteerInput{}
+	_ Message = ParseError{}
+	_ Message = QuestionRequest{}
+	_ Message = HookRequest{}
 
 	_ Event = TurnBegin{}
 	_ Event = TurnEnd{}
@@ -38,9 +44,15 @@ var (
 	_ Event = SubagentEvent{}
 	_ Event = ApprovalRequestResolved{}
 	_ Event = ApprovalResponse{}
+	_ Event = HookTriggered{}
+	_ Event = HookResolved{}
+	_ Event = SteerInput{}
+	_ Event = ParseError{}
 
 	_ Request = ApprovalRequest{}
 	_ Request = ToolCallRequest{}
+	_ Request = QuestionRequest{}
+	_ Request = HookRequest{}
 )
 
 func TestEvent_EventTypeConstants(t *testing.T) {
@@ -63,6 +75,10 @@ func TestEvent_EventTypeConstants(t *testing.T) {
 		{"SubagentEvent", SubagentEvent{}, EventTypeSubagentEvent},
 		{"ApprovalRequestResolved", ApprovalRequestResolved{}, EventTypeApprovalRequestResolved},
 		{"ApprovalResponse", ApprovalResponse{}, EventTypeApprovalResponse},
+		{"HookTriggered", HookTriggered{}, EventTypeHookTriggered},
+		{"HookResolved", HookResolved{}, EventTypeHookResolved},
+		{"SteerInput", SteerInput{}, EventTypeSteerInput},
+		{"ParseError", ParseError{}, EventTypeParseError},
 	}
 
 	for _, tc := range cases {
@@ -223,7 +239,7 @@ func TestApprovalRequest_MarshalJSON_IgnoresResponder(t *testing.T) {
 func TestEventParams_UnmarshalJSON_AllEventTypes(t *testing.T) {
 	turn := TurnBegin{UserInput: NewStringContent("hi")}
 	sub := SubagentEvent{
-		TaskToolCallID: "ttc",
+		ParentToolCallID: "ttc",
 		Event: EventParams{
 			Type:    EventTypeTurnBegin,
 			Payload: turn,
@@ -242,6 +258,7 @@ func TestEventParams_UnmarshalJSON_AllEventTypes(t *testing.T) {
 		{"CompactionBegin", EventTypeCompactionBegin, CompactionBegin{}},
 		{"CompactionEnd", EventTypeCompactionEnd, CompactionEnd{}},
 		{"StatusUpdate", EventTypeStatusUpdate, StatusUpdate{ContextUsage: Optional[float64]{Value: 0.5, Valid: true}}},
+		{"StatusUpdate_PlanMode", EventTypeStatusUpdate, StatusUpdate{PlanMode: Optional[bool]{Value: true, Valid: true}}},
 		{"ContentPart", EventTypeContentPart, NewTextContentPart("hello")},
 		{"ToolCall", EventTypeToolCall, ToolCall{Type: "function", ID: "1", Function: ToolCallFunction{Name: "f"}}},
 		{"ToolCallPart", EventTypeToolCallPart, ToolCallPart{ArgumentsPart: Optional[string]{Value: "x", Valid: true}}},
@@ -249,6 +266,10 @@ func TestEventParams_UnmarshalJSON_AllEventTypes(t *testing.T) {
 		{"SubagentEvent", EventTypeSubagentEvent, sub},
 		{"ApprovalRequestResolved", EventTypeApprovalRequestResolved, ApprovalRequestResolved{RequestID: "rid", Response: ApprovalRequestResponseApprove}},
 		{"ApprovalResponse", EventTypeApprovalResponse, ApprovalResponse{RequestID: "rid", Response: ApprovalRequestResponseApprove}},
+		{"HookTriggered", EventTypeHookTriggered, HookTriggered{Event: "PreToolUse", Target: "Shell", HookCount: 2}},
+		{"HookResolved", EventTypeHookResolved, HookResolved{Event: "PreToolUse", Target: "Shell", Action: HookActionAllow, Reason: "", DurationMs: 42}},
+		{"SteerInput", EventTypeSteerInput, SteerInput{UserInput: NewStringContent("steer")}},
+		{"ParseError", EventTypeParseError, ParseError{Code: "SCHEMA_MISMATCH", Message: "bad payload"}},
 	}
 
 	for _, tc := range cases {
@@ -281,11 +302,47 @@ func TestEventParams_UnmarshalJSON_AllEventTypes(t *testing.T) {
 	}
 }
 
-func TestEventParams_UnmarshalJSON_UnknownTypeReturnsError(t *testing.T) {
+// TestEventParams_UnmarshalJSON_UnknownTypeTolerated documents the wire
+// resilience contract introduced in 88b05b3: unknown event types do NOT
+// raise — they record the Type but leave Payload nil so the net/rpc loop
+// keeps serving. Downstream (Responder.Event) must guard on nil Payload.
+func TestEventParams_UnmarshalJSON_UnknownTypeTolerated(t *testing.T) {
 	var p EventParams
-	err := json.Unmarshal([]byte(`{"type":"DoesNotExist","payload":{}}`), &p)
-	if err == nil {
-		t.Fatalf("expected error for unknown event type")
+	if err := json.Unmarshal([]byte(`{"type":"DoesNotExist","payload":{}}`), &p); err != nil {
+		t.Fatalf("expected no error for unknown event type, got %v", err)
+	}
+	if p.Type != "DoesNotExist" {
+		t.Fatalf("Type=%q, want %q", p.Type, "DoesNotExist")
+	}
+	if p.Payload != nil {
+		t.Fatalf("Payload should be nil for unknown event type, got %T", p.Payload)
+	}
+}
+
+func TestSubagentEvent_JSONFieldRename(t *testing.T) {
+	sub := SubagentEvent{ParentToolCallID: "tc-1"}
+	b, err := json.Marshal(sub)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, ok := raw["parent_tool_call_id"]; !ok {
+		t.Fatalf("expected parent_tool_call_id field; got %v", raw)
+	}
+	if _, ok := raw["task_tool_call_id"]; ok {
+		t.Fatalf("old task_tool_call_id field must be gone; got %v", raw)
+	}
+
+	// Decoding the new wire field must populate ParentToolCallID.
+	var parsed SubagentEvent
+	if err := json.Unmarshal([]byte(`{"parent_tool_call_id":"tc-2","event":{"type":"TurnEnd","payload":{}}}`), &parsed); err != nil {
+		t.Fatalf("decode parent_tool_call_id: %v", err)
+	}
+	if parsed.ParentToolCallID != "tc-2" {
+		t.Fatalf("ParentToolCallID=%q, want %q", parsed.ParentToolCallID, "tc-2")
 	}
 }
 
@@ -329,5 +386,63 @@ func TestRequestParams_UnmarshalJSON_UnknownTypeReturnsError(t *testing.T) {
 	err := json.Unmarshal([]byte(`{"type":"DoesNotExist","payload":{}}`), &p)
 	if err == nil {
 		t.Fatalf("expected error for unknown request type")
+	}
+}
+
+func TestRequestParams_UnmarshalJSON_QuestionRequest(t *testing.T) {
+	raw := `{
+		"type":"QuestionRequest",
+		"payload":{
+			"id":"q1",
+			"tool_call_id":"tc1",
+			"questions":[{"question":"continue?","options":[{"label":"yes"},{"label":"no"}]}]
+		}
+	}`
+	var got RequestParams
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Type != RequestTypeQuestionRequest {
+		t.Fatalf("Type=%q, want %q", got.Type, RequestTypeQuestionRequest)
+	}
+	qr, ok := got.Payload.(QuestionRequest)
+	if !ok {
+		t.Fatalf("unexpected payload type: %T", got.Payload)
+	}
+	if qr.ID != "q1" || qr.ToolCallID != "tc1" || len(qr.Questions) != 1 {
+		t.Fatalf("unexpected QuestionRequest: %+v", qr)
+	}
+	if qr.Questions[0].Question != "continue?" {
+		t.Fatalf("Question=%q", qr.Questions[0].Question)
+	}
+}
+
+func TestRequestParams_UnmarshalJSON_HookRequest(t *testing.T) {
+	raw := `{
+		"type":"HookRequest",
+		"payload":{
+			"id":"h1",
+			"subscription_id":"sub1",
+			"event":"PreToolUse",
+			"target":"Shell",
+			"input_data":{"command":"ls"}
+		}
+	}`
+	var got RequestParams
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Type != RequestTypeHookRequest {
+		t.Fatalf("Type=%q, want %q", got.Type, RequestTypeHookRequest)
+	}
+	hr, ok := got.Payload.(HookRequest)
+	if !ok {
+		t.Fatalf("unexpected payload type: %T", got.Payload)
+	}
+	if hr.ID != "h1" || hr.SubscriptionID != "sub1" || hr.Event != "PreToolUse" || hr.Target != "Shell" {
+		t.Fatalf("unexpected HookRequest: %+v", hr)
+	}
+	if cmd, _ := hr.InputData["command"].(string); cmd != "ls" {
+		t.Fatalf("InputData[command]=%v, want %q", hr.InputData["command"], "ls")
 	}
 }

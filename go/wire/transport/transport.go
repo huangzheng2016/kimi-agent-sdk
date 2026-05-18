@@ -10,6 +10,8 @@ type Transport interface {
 	Initialize(params *wire.InitializeParams) (*wire.InitializeResult, error)
 	Prompt(params *wire.PromptParams) (*wire.PromptResult, error)
 	Cancel(params *wire.CancelParams) (*wire.CancelResult, error)
+	SetPlanMode(params *wire.SetPlanModeParams) (*wire.SetPlanModeResult, error)
+	Steer(params *wire.SteerParams) (*wire.SteerResult, error)
 	Event(event *wire.EventParams) (*wire.EventResult, error)
 	Request(request *wire.RequestParams) (wire.RequestResult, error)
 }

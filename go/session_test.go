@@ -175,6 +175,136 @@ func TestResponderFunc(t *testing.T) {
 	}
 }
 
+func TestCamelToSnake(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"Prompt", "prompt"},
+		{"Initialize", "initialize"},
+		{"Cancel", "cancel"},
+		{"Event", "event"},
+		{"Request", "request"},
+		{"Steer", "steer"},
+		{"SetPlanMode", "set_plan_mode"},
+		{"HTTPServer", "h_t_t_p_server"}, // documents naive behavior; not used by wire.
+	}
+	for _, tc := range cases {
+		if got := camelToSnake(tc.in); got != tc.want {
+			t.Errorf("camelToSnake(%q)=%q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestSnakeToPascal(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"event", "Event"},
+		{"request", "Request"},
+		{"set_plan_mode", "SetPlanMode"},
+		{"initialize", "Initialize"},
+	}
+	for _, tc := range cases {
+		if got := snakeToPascal(tc.in); got != tc.want {
+			t.Errorf("snakeToPascal(%q)=%q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestResponder_HookRequest_DispatchesHandler(t *testing.T) {
+	var msgs chan wire.Message
+	var usrc chan wire.RequestResponse
+	var rwlock sync.RWMutex
+	var called bool
+	handler := func(req *wire.HookRequest) (wire.HookAction, string) {
+		called = true
+		if req.SubscriptionID != "sub-1" {
+			t.Errorf("SubscriptionID=%q, want sub-1", req.SubscriptionID)
+		}
+		return wire.HookActionBlock, "denied"
+	}
+	responder := &Responder{
+		rwlock:                  &rwlock,
+		pending:                 new(atomic.Int64),
+		wireMessageBridge:       &msgs,
+		wireRequestResponseChan: &usrc,
+		hookHandlers:            map[string]HookHandler{"sub-1": handler},
+	}
+	res, err := responder.Request(&wire.RequestParams{
+		Type: wire.RequestTypeHookRequest,
+		Payload: wire.HookRequest{
+			ID:             "hook-1",
+			SubscriptionID: "sub-1",
+			Event:          "PreToolUse",
+			Target:         "Shell",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	if !called {
+		t.Fatal("handler not invoked")
+	}
+	hr, ok := res.(*wire.HookResponse)
+	if !ok {
+		t.Fatalf("unexpected response type: %T", res)
+	}
+	if hr.Action != wire.HookActionBlock || hr.Reason != "denied" || hr.RequestID != "hook-1" {
+		t.Fatalf("unexpected response: %+v", hr)
+	}
+}
+
+func TestResponder_HookRequest_FailOpenOnPanic(t *testing.T) {
+	var msgs chan wire.Message
+	var usrc chan wire.RequestResponse
+	var rwlock sync.RWMutex
+	responder := &Responder{
+		rwlock:                  &rwlock,
+		pending:                 new(atomic.Int64),
+		wireMessageBridge:       &msgs,
+		wireRequestResponseChan: &usrc,
+		hookHandlers: map[string]HookHandler{
+			"sub-1": func(req *wire.HookRequest) (wire.HookAction, string) {
+				panic("kaboom")
+			},
+		},
+	}
+	res, err := responder.Request(&wire.RequestParams{
+		Type:    wire.RequestTypeHookRequest,
+		Payload: wire.HookRequest{ID: "hook-1", SubscriptionID: "sub-1"},
+	})
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	hr := res.(*wire.HookResponse)
+	if hr.Action != wire.HookActionAllow {
+		t.Fatalf("Action=%q, want allow (fail-open)", hr.Action)
+	}
+}
+
+func TestResponder_HookRequest_NoHandlerFailsOpen(t *testing.T) {
+	var msgs chan wire.Message
+	var usrc chan wire.RequestResponse
+	var rwlock sync.RWMutex
+	responder := &Responder{
+		rwlock:                  &rwlock,
+		pending:                 new(atomic.Int64),
+		wireMessageBridge:       &msgs,
+		wireRequestResponseChan: &usrc,
+	}
+	res, err := responder.Request(&wire.RequestParams{
+		Type:    wire.RequestTypeHookRequest,
+		Payload: wire.HookRequest{ID: "hook-1", SubscriptionID: "unknown"},
+	})
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	hr := res.(*wire.HookResponse)
+	if hr.Action != wire.HookActionAllow {
+		t.Fatalf("Action=%q, want allow", hr.Action)
+	}
+}
+
 func TestStdio_Close(t *testing.T) {
 	// Create mock readers/writers
 	r, w := io.Pipe()

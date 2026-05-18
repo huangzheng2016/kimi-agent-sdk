@@ -15,9 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
-
 	"github.com/MoonshotAI/kimi-agent-sdk/go/wire"
 	"github.com/MoonshotAI/kimi-agent-sdk/go/wire/jsonrpc2"
 	"github.com/MoonshotAI/kimi-agent-sdk/go/wire/transport"
@@ -26,6 +23,46 @@ import (
 var (
 	tpname = reflect.TypeOf((*transport.Transport)(nil)).Elem().Name()
 )
+
+// camelToSnake converts a Go-style PascalCase/camelCase method name to the
+// snake_case names the kimi cli protocol expects (e.g. "SetPlanMode" →
+// "set_plan_mode"). Single-word inputs lower-case to themselves
+// ("Prompt" → "prompt"), so existing single-word methods stay wire-compatible.
+func camelToSnake(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+	for i, r := range s {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			b.WriteByte('_')
+		}
+		if r >= 'A' && r <= 'Z' {
+			r += 'a' - 'A'
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// snakeToPascal reverses camelToSnake for the server method renamer, so a
+// snake_case method coming in from the cli (e.g. "event") maps back to the
+// Go server method name ("Event").
+func snakeToPascal(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	upper := true
+	for _, r := range s {
+		if r == '_' {
+			upper = true
+			continue
+		}
+		if upper && r >= 'a' && r <= 'z' {
+			r -= 'a' - 'A'
+		}
+		upper = false
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 func NewSession(options ...Option) (*Session, error) {
 	opt := &option{
@@ -63,10 +100,10 @@ func NewSession(options ...Option) (*Session, error) {
 	}
 	codec := jsonrpc2.NewCodec(&stdio{stdin, stdout},
 		jsonrpc2.ClientMethodRenamer(jsonrpc2.RenamerFunc(func(method string) string {
-			return strings.ToLower(strings.TrimPrefix(method, tpname+"."))
+			return camelToSnake(strings.TrimPrefix(method, tpname+"."))
 		})),
 		jsonrpc2.ServerMethodRenamer(jsonrpc2.RenamerFunc(func(method string) string {
-			return tpname + "." + cases.Title(language.English).String(method)
+			return tpname + "." + snakeToPascal(method)
 		})),
 	)
 	tp := transport.NewTransportClient(rpc.NewClientWithCodec(codec))
@@ -81,6 +118,7 @@ func NewSession(options ...Option) (*Session, error) {
 		pending:                 &session.pending,
 		wireMessageBridge:       &session.wireMessageBridge,
 		wireRequestResponseChan: &session.wireRequestResponseChan,
+		hookHandlers:            opt.hookHandlers,
 	}
 	wireProtocolVersion, err := getWireProtocolVersion(opt.exec)
 	if err != nil {
@@ -92,9 +130,22 @@ func NewSession(options ...Option) (*Session, error) {
 		for _, tool := range opt.tools {
 			toolDefs = append(toolDefs, tool.def)
 		}
+		capabilities := opt.capabilities
+		if !capabilities.Valid {
+			capabilities = wire.Optional[wire.ClientCapabilities]{
+				Value: wire.ClientCapabilities{
+					SupportsQuestion: wire.Optional[bool]{Value: true, Valid: true},
+					SupportsPlanMode: wire.Optional[bool]{Value: true, Valid: true},
+				},
+				Valid: true,
+			}
+		}
 		initResult, err := tp.Initialize(&wire.InitializeParams{
-			ProtocolVersion: wireProtocolVersion,
+			ProtocolVersion: wire.SDKProtocolVersion,
+			Client:          opt.clientInfo,
 			ExternalTools:   toolDefs,
+			Hooks:           opt.hooks,
+			Capabilities:    capabilities,
 		})
 		if err != nil {
 			cancel()
@@ -127,8 +178,27 @@ type Session struct {
 	wireMessageBridge       chan wire.Message
 	wireRequestResponseChan chan wire.RequestResponse
 	tp                      transport.Transport
+	planMode                atomic.Bool
 
 	SlashCommands []wire.SlashCommand
+}
+
+// SetPlanMode toggles Plan Mode on the cli (Wire 1.5+). The cli echoes the
+// new state in the result and via subsequent StatusUpdate.plan_mode events;
+// PlanMode() returns the latest observed value.
+func (s *Session) SetPlanMode(enabled bool) (bool, error) {
+	res, err := s.tp.SetPlanMode(&wire.SetPlanModeParams{Enabled: enabled})
+	if err != nil {
+		return s.planMode.Load(), err
+	}
+	s.planMode.Store(res.PlanMode)
+	return res.PlanMode, nil
+}
+
+// PlanMode returns the last plan-mode state acknowledged by the cli (either
+// via SetPlanMode's result or via a StatusUpdate.plan_mode event).
+func (s *Session) PlanMode() bool {
+	return s.planMode.Load()
 }
 
 func (s *Session) serve(responder *transport.TransportServer) {
@@ -159,7 +229,7 @@ func (s *Session) waitForDataExchange() {
 }
 
 func (s *Session) Prompt(ctx context.Context, content wire.Content) (*Turn, error) {
-	return roundtrip(ctx, s, &turnConstructor{s.tp, content})
+	return roundtrip(ctx, s, &turnConstructor{s, content})
 }
 
 func roundtrip[T any, R any, I interface {
@@ -295,6 +365,7 @@ type Responder struct {
 	wireMessageBridge       *chan wire.Message
 	wireRequestResponseChan *chan wire.RequestResponse
 	tools                   []Tool
+	hookHandlers            map[string]HookHandler
 }
 
 func (r *Responder) Event(event *wire.EventParams) (*wire.EventResult, error) {
@@ -302,6 +373,10 @@ func (r *Responder) Event(event *wire.EventParams) (*wire.EventResult, error) {
 	defer r.pending.Add(-1)
 	r.rwlock.RLock()
 	defer r.rwlock.RUnlock()
+	// 跳过未知 event type 留下的空 payload（见 wire/message.go 的 UnmarshalJSON 兼容逻辑）。
+	if event.Payload == nil {
+		return &wire.EventResult{}, nil
+	}
 	if *r.wireMessageBridge != nil {
 		*r.wireMessageBridge <- event.Payload
 	}
@@ -313,6 +388,12 @@ func (r *Responder) Request(request *wire.RequestParams) (wire.RequestResult, er
 	defer r.pending.Add(-1)
 	r.rwlock.RLock()
 	defer r.rwlock.RUnlock()
+	// HookRequest is dispatched on the registered handler if any, and falls
+	// back to fail-open allow. It does NOT require an in-progress turn —
+	// hooks fire during Initialize-time setup as well.
+	if hookReq, ok := request.Payload.(wire.HookRequest); ok {
+		return r.handleHookRequest(hookReq), nil
+	}
 	if *r.wireMessageBridge == nil || *r.wireRequestResponseChan == nil {
 		return nil, jsonrpc2.Error{
 			Code:    jsonrpc2.ErrorCodeInternalError,
@@ -358,12 +439,59 @@ func (r *Responder) Request(request *wire.RequestParams) (wire.RequestResult, er
 			Code:    jsonrpc2.ErrorCodeInvalidParams,
 			Message: fmt.Sprintf("tool not found: %s", req.Name),
 		}
+	case wire.QuestionRequest:
+		req.Responder = ResponderFunc(func(rr wire.RequestResponse) error {
+			if _, ok := rr.(wire.QuestionResponse); !ok {
+				return fmt.Errorf("invalid question response type: %T", rr)
+			}
+			*r.wireRequestResponseChan <- rr
+			return nil
+		})
+		*r.wireMessageBridge <- req
+		response := (<-*r.wireRequestResponseChan).(wire.QuestionResponse)
+		response.RequestID = req.ID
+		return &response, nil
 	default:
 		return nil, jsonrpc2.Error{
 			Code:    jsonrpc2.ErrorCodeInvalidRequest,
 			Message: fmt.Sprintf("unknown request type: %T", req),
 		}
 	}
+}
+
+// handleHookRequest invokes the user-registered handler for this hook
+// subscription. Panics, missing handlers, and unknown actions all collapse
+// to fail-open allow — matching the Node SDK contract — so a buggy hook
+// can never block the cli indefinitely.
+func (r *Responder) handleHookRequest(req wire.HookRequest) *wire.HookResponse {
+	resp := &wire.HookResponse{RequestID: req.ID, Action: wire.HookActionAllow}
+	handler, ok := r.hookHandlers[req.SubscriptionID]
+	if !ok {
+		// No handler — surface the event to the active turn (if any) so
+		// observers can still react, then fail open.
+		if r.wireMessageBridge != nil && *r.wireMessageBridge != nil {
+			select {
+			case *r.wireMessageBridge <- req:
+			default:
+			}
+		}
+		return resp
+	}
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				resp.Action = wire.HookActionAllow
+				resp.Reason = fmt.Sprintf("hook handler panic: %v", rec)
+			}
+		}()
+		action, reason := handler(&req)
+		if action == "" {
+			action = wire.HookActionAllow
+		}
+		resp.Action = action
+		resp.Reason = reason
+	}()
+	return resp
 }
 
 func (s *Session) Close() error {
@@ -426,12 +554,12 @@ type Constructor[T any, R any] interface {
 }
 
 type turnConstructor struct {
-	transport transport.Transport
-	content   wire.Content
+	session *Session
+	content wire.Content
 }
 
 func (tc *turnConstructor) RPCRequest() (*wire.PromptResult, error) {
-	return tc.transport.Prompt(&wire.PromptParams{
+	return tc.session.tp.Prompt(&wire.PromptParams{
 		UserInput: tc.content,
 	})
 }
@@ -450,13 +578,14 @@ func (tc *turnConstructor) Construct(
 	return turnBegin(
 		ctx,
 		id,
-		tc.transport,
+		tc.session.tp,
 		errorPointer,
 		resultPointer,
 		wireProtocolVersion,
 		wireMessageChan,
 		wireRequestResponseChan,
 		exit,
+		tc.session,
 	)
 }
 

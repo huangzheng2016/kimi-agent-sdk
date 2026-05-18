@@ -47,6 +47,26 @@ func (impl *implTransportClient) Cancel(params *wire.CancelParams) (*wire.Cancel
 	return CancelRPCReply, nil
 }
 
+func (impl *implTransportClient) SetPlanMode(params *wire.SetPlanModeParams) (*wire.SetPlanModeResult, error) {
+	SetPlanModeRPCReply :=
+		new(wire.SetPlanModeResult)
+	SetPlanModeErr := impl.rpcClient.Call("Transport.SetPlanMode", params, SetPlanModeRPCReply)
+	if SetPlanModeErr != nil {
+		return nil, SetPlanModeErr
+	}
+	return SetPlanModeRPCReply, nil
+}
+
+func (impl *implTransportClient) Steer(params *wire.SteerParams) (*wire.SteerResult, error) {
+	SteerRPCReply :=
+		new(wire.SteerResult)
+	SteerErr := impl.rpcClient.Call("Transport.Steer", params, SteerRPCReply)
+	if SteerErr != nil {
+		return nil, SteerErr
+	}
+	return SteerRPCReply, nil
+}
+
 func (impl *implTransportClient) Event(event *wire.EventParams) (*wire.EventResult, error) {
 	EventRPCReply :=
 		new(wire.EventResult)
@@ -109,6 +129,30 @@ func (srv *TransportServer) Cancel(
 		return CancelErr
 	}
 	*reply = *CancelRPCReply
+	return nil
+}
+
+func (srv *TransportServer) SetPlanMode(
+	arg *wire.SetPlanModeParams,
+	reply *wire.SetPlanModeResult,
+) error {
+	SetPlanModeRPCReply, SetPlanModeErr := srv.implTransport.SetPlanMode(arg)
+	if SetPlanModeErr != nil {
+		return SetPlanModeErr
+	}
+	*reply = *SetPlanModeRPCReply
+	return nil
+}
+
+func (srv *TransportServer) Steer(
+	arg *wire.SteerParams,
+	reply *wire.SteerResult,
+) error {
+	SteerRPCReply, SteerErr := srv.implTransport.Steer(arg)
+	if SteerErr != nil {
+		return SteerErr
+	}
+	*reply = *SteerRPCReply
 	return nil
 }
 

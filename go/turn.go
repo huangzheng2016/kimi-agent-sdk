@@ -3,7 +3,6 @@ package kimi
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync/atomic"
 
 	"github.com/MoonshotAI/kimi-agent-sdk/go/wire"
@@ -24,6 +23,7 @@ func turnBegin(
 	wireMessageChan <-chan wire.Message,
 	wireRequestResponseChan chan<- wire.RequestResponse,
 	exit func(error) error,
+	session *Session,
 ) *Turn {
 	parent, cancel := context.WithCancel(ctx)
 	current, stop := context.WithCancel(context.Background())
@@ -40,6 +40,7 @@ func turnBegin(
 		exit:                    exit,
 		wireProtocolVersion:     wireProtocolVersion,
 		wireRequestResponseChan: wireRequestResponseChan,
+		session:                 session,
 		Steps:                   steps,
 	}
 	turn.usage.Store(&Usage{})
@@ -64,6 +65,14 @@ type Turn struct {
 
 	wireProtocolVersion     string
 	wireRequestResponseChan chan<- wire.RequestResponse
+	session                 *Session
+}
+
+// Steer injects user input mid-turn (Wire 1.5+). The cli echoes the input
+// back as a SteerInput event so observers see it in the message stream.
+func (t *Turn) Steer(content wire.Content) error {
+	_, err := t.tp.Steer(&wire.SteerParams{UserInput: content})
+	return err
 }
 
 func (t *Turn) watch(parent context.Context) {
@@ -133,6 +142,9 @@ func (t *Turn) traverse(incoming <-chan wire.Message, steps chan<- *Step) {
 				}
 			case wire.EventTypeStatusUpdate:
 				update := x.(wire.StatusUpdate)
+				if update.PlanMode.Valid && t.session != nil {
+					t.session.planMode.Store(update.PlanMode.Value)
+				}
 			CAS:
 				for {
 					oldUsage := t.usage.Load()
@@ -161,7 +173,13 @@ func (t *Turn) traverse(incoming <-chan wire.Message, steps chan<- *Step) {
 				}
 			}
 		default:
-			panic(fmt.Sprintf("unexpected message type: %T", x))
+			// Defensive: the wire layer already silently skips unknown
+			// event types (yielding a nil-payload Event ignored by the
+			// Responder), so this branch should be unreachable. If a
+			// future change ever surfaces an exotic Message subtype, drop
+			// it instead of panicking — losing one message is preferable
+			// to tearing down the whole turn.
+			_ = x
 		}
 	}
 }

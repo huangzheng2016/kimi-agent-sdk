@@ -51,7 +51,7 @@ func setupTurnWithVersion(t *testing.T, wireProtocolVersion string) (
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	turn := turnBegin(ctx, 0, mockTP, new(atomic.Pointer[error]), result, wireProtocolVersion, msgs, usrc, exit)
+	turn := turnBegin(ctx, 0, mockTP, new(atomic.Pointer[error]), result, wireProtocolVersion, msgs, usrc, exit, nil)
 
 	var closeOnce sync.Once
 	closeMsgs := func() {
@@ -93,7 +93,7 @@ func TestTurn_Result_Finished(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	turn := turnBegin(ctx, 0, mockTP, new(atomic.Pointer[error]), result, "1.1", msgs, usrc, exit)
+	turn := turnBegin(ctx, 0, mockTP, new(atomic.Pointer[error]), result, "1.1", msgs, usrc, exit, nil)
 
 	// Update result to finished
 	result.Store(&wire.PromptResult{
@@ -151,7 +151,7 @@ func TestTurn_Cancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	turn := turnBegin(ctx, 0, mockTP, new(atomic.Pointer[error]), result, "1.1", msgs, usrc, exit)
+	turn := turnBegin(ctx, 0, mockTP, new(atomic.Pointer[error]), result, "1.1", msgs, usrc, exit, nil)
 
 	err := turn.Cancel()
 	if err != nil {
@@ -320,7 +320,7 @@ func TestTurn_watch_ContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	_ = turnBegin(ctx, 0, mockTP, new(atomic.Pointer[error]), result, "1.1", msgs, usrc, exit)
+	_ = turnBegin(ctx, 0, mockTP, new(atomic.Pointer[error]), result, "1.1", msgs, usrc, exit, nil)
 
 	// Cancel the context
 	cancel()

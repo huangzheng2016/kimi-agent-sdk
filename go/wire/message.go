@@ -6,17 +6,26 @@ import (
 	"fmt"
 )
 
+// SDKProtocolVersion is the wire protocol version this SDK speaks.
+// Sent in InitializeParams.ProtocolVersion. Kept in sync with Node SDK
+// (node/agent_sdk/protocol.ts PROTOCOL_VERSION).
+const SDKProtocolVersion = "1.7"
+
 type (
 	InitializeParams struct {
-		ProtocolVersion string               `json:"protocol_version"`
-		Client          Optional[ClientInfo] `json:"client,omitzero"`
-		ExternalTools   []ExternalTool       `json:"external_tools,omitempty"`
+		ProtocolVersion string                         `json:"protocol_version"`
+		Client          Optional[ClientInfo]           `json:"client,omitzero"`
+		ExternalTools   []ExternalTool                 `json:"external_tools,omitempty"`
+		Hooks           []HookSubscription             `json:"hooks,omitempty"`
+		Capabilities    Optional[ClientCapabilities]   `json:"capabilities,omitzero"`
 	}
 	InitializeResult struct {
 		ProtocolVersion string                        `json:"protocol_version"`
 		Server          ServerInfo                    `json:"server"`
 		SlashCommands   []SlashCommand                `json:"slash_commands"`
 		ExternalTools   Optional[ExternalToolsResult] `json:"external_tools,omitzero"`
+		Hooks           Optional[HooksInfo]           `json:"hooks,omitzero"`
+		Capabilities    Optional[ServerCapabilities]  `json:"capabilities,omitzero"`
 	}
 	ClientInfo struct {
 		Name    string `json:"name"`
@@ -46,9 +55,20 @@ type (
 		Status PromptResultStatus `json:"status"`
 		Steps  Optional[int]      `json:"steps"`
 	}
-	CancelParams struct{}
-	CancelResult struct{}
-	EventParams  struct {
+	CancelParams       struct{}
+	CancelResult       struct{}
+	SetPlanModeParams  struct {
+		Enabled bool `json:"enabled"`
+	}
+	SetPlanModeResult struct {
+		Status   string `json:"status"`
+		PlanMode bool   `json:"plan_mode"`
+	}
+	SteerParams struct {
+		UserInput Content `json:"user_input"`
+	}
+	SteerResult struct{}
+	EventParams struct {
 		Type    EventType `json:"type"`
 		Payload Event     `json:"payload"`
 	}
@@ -81,6 +101,12 @@ func (ApprovalRequestResolved) message() {}
 func (ApprovalResponse) message()        {}
 func (ApprovalRequest) message()         {}
 func (ToolCallRequest) message()         {}
+func (HookTriggered) message()           {}
+func (HookResolved) message()            {}
+func (SteerInput) message()              {}
+func (ParseError) message()              {}
+func (QuestionRequest) message()         {}
+func (HookRequest) message()             {}
 
 type Event interface {
 	Message
@@ -104,6 +130,10 @@ const (
 	EventTypeSubagentEvent           EventType = "SubagentEvent"
 	EventTypeApprovalRequestResolved EventType = "ApprovalRequestResolved"
 	EventTypeApprovalResponse        EventType = "ApprovalResponse"
+	EventTypeHookTriggered           EventType = "HookTriggered"
+	EventTypeHookResolved            EventType = "HookResolved"
+	EventTypeSteerInput              EventType = "SteerInput"
+	EventTypeParseError              EventType = "ParseError"
 )
 
 func (TurnBegin) EventType() EventType               { return EventTypeTurnBegin }
@@ -120,6 +150,10 @@ func (ToolResult) EventType() EventType              { return EventTypeToolResul
 func (SubagentEvent) EventType() EventType           { return EventTypeSubagentEvent }
 func (ApprovalRequestResolved) EventType() EventType { return EventTypeApprovalRequestResolved }
 func (ApprovalResponse) EventType() EventType        { return EventTypeApprovalResponse }
+func (HookTriggered) EventType() EventType           { return EventTypeHookTriggered }
+func (HookResolved) EventType() EventType            { return EventTypeHookResolved }
+func (SteerInput) EventType() EventType              { return EventTypeSteerInput }
+func (ParseError) EventType() EventType              { return EventTypeParseError }
 
 func unmarshalEvent[E Event](data []byte) (Event, error) {
 	var event E
@@ -144,6 +178,10 @@ var eventUnmarshaler = map[EventType]func(data []byte) (Event, error){
 	EventTypeSubagentEvent:           unmarshalEvent[SubagentEvent],
 	EventTypeApprovalRequestResolved: unmarshalEvent[ApprovalRequestResolved],
 	EventTypeApprovalResponse:        unmarshalEvent[ApprovalResponse],
+	EventTypeHookTriggered:           unmarshalEvent[HookTriggered],
+	EventTypeHookResolved:            unmarshalEvent[HookResolved],
+	EventTypeSteerInput:              unmarshalEvent[SteerInput],
+	EventTypeParseError:              unmarshalEvent[ParseError],
 }
 
 func (params *EventParams) UnmarshalJSON(data []byte) (err error) {
@@ -156,7 +194,11 @@ func (params *EventParams) UnmarshalJSON(data []byte) (err error) {
 	}
 	unmarshaler, ok := eventUnmarshaler[discriminator.Type]
 	if !ok {
-		return fmt.Errorf("unknown event type: %q", discriminator.Type)
+		// 兼容新版 kimi cli 引入的未知 event type（如 HookTriggered/HookResolved）：
+		// 静默跳过，不让 net/rpc server 因反序列化错误终止整个 wire 通道。
+		params.Type = discriminator.Type
+		params.Payload = nil
+		return nil
 	}
 	if params.Payload, err = unmarshaler(discriminator.Payload); err != nil {
 		return err
@@ -187,12 +229,18 @@ type RequestType string
 const (
 	RequestTypeApprovalRequest RequestType = "ApprovalRequest"
 	RequestTypeToolCallRequest RequestType = "ToolCallRequest"
+	RequestTypeQuestionRequest RequestType = "QuestionRequest"
+	RequestTypeHookRequest     RequestType = "HookRequest"
 )
 
 func (r ApprovalRequest) RequestType() RequestType { return RequestTypeApprovalRequest }
 func (r ToolCallRequest) RequestType() RequestType { return RequestTypeToolCallRequest }
+func (r QuestionRequest) RequestType() RequestType { return RequestTypeQuestionRequest }
+func (r HookRequest) RequestType() RequestType     { return RequestTypeHookRequest }
 
 func (ApprovalRequestResponse) requestResponse() {}
+func (QuestionResponse) requestResponse()        {}
+func (HookResponse) requestResponse()            {}
 
 func unmarshalRequest[R Request](data []byte) (Request, error) {
 	var request R
@@ -205,6 +253,8 @@ func unmarshalRequest[R Request](data []byte) (Request, error) {
 var requestUnmarshaler = map[RequestType]func(data []byte) (Request, error){
 	RequestTypeApprovalRequest: unmarshalRequest[ApprovalRequest],
 	RequestTypeToolCallRequest: unmarshalRequest[ToolCallRequest],
+	RequestTypeQuestionRequest: unmarshalRequest[QuestionRequest],
+	RequestTypeHookRequest:     unmarshalRequest[HookRequest],
 }
 
 func (params *RequestParams) UnmarshalJSON(data []byte) (err error) {
@@ -341,6 +391,9 @@ type StatusUpdate struct {
 	ContextUsage Optional[float64]    `json:"context_usage,omitzero"`
 	TokenUsage   Optional[TokenUsage] `json:"token_usage,omitzero"`
 	MessageID    Optional[string]     `json:"message_id,omitzero"`
+	// PlanMode reflects current plan-mode state (Wire 1.5).
+	// nil/invalid = unchanged; true/false = explicit state transition.
+	PlanMode Optional[bool] `json:"plan_mode,omitzero"`
 }
 
 type TokenUsage struct {
@@ -411,8 +464,10 @@ type ToolResultReturnValue struct {
 }
 
 type SubagentEvent struct {
-	TaskToolCallID string      `json:"task_tool_call_id"`
-	Event          EventParams `json:"event"`
+	// ParentToolCallID is the tool-call ID of the parent agent's Task tool
+	// that spawned this sub-agent (Wire 1.6 rename from task_tool_call_id).
+	ParentToolCallID string      `json:"parent_tool_call_id"`
+	Event            EventParams `json:"event"`
 }
 
 // Deprecated: Renamed to ApprovalResponse in Wire 1.1.
@@ -559,4 +614,116 @@ func (o *Optional[T]) UnmarshalJSON(data []byte) error {
 	}
 	o.Valid = true
 	return nil
+}
+
+// ----------------------------------------------------------------------------
+// Wire 1.4 — Client / server capabilities
+// ----------------------------------------------------------------------------
+
+type ClientCapabilities struct {
+	SupportsQuestion Optional[bool] `json:"supports_question,omitzero"`
+	SupportsPlanMode Optional[bool] `json:"supports_plan_mode,omitzero"`
+}
+
+type ServerCapabilities struct {
+	SupportsQuestion Optional[bool] `json:"supports_question,omitzero"`
+}
+
+// ----------------------------------------------------------------------------
+// Wire 1.4 — QuestionRequest / QuestionResponse
+// ----------------------------------------------------------------------------
+
+type QuestionOption struct {
+	Label       string           `json:"label"`
+	Description Optional[string] `json:"description,omitzero"`
+}
+
+type QuestionItem struct {
+	Question    string           `json:"question"`
+	Header      Optional[string] `json:"header,omitzero"`
+	Options     []QuestionOption `json:"options"`
+	MultiSelect Optional[bool]   `json:"multi_select,omitzero"`
+}
+
+type QuestionRequest struct {
+	Responder  `json:"-"`
+	ID         string         `json:"id"`
+	ToolCallID string         `json:"tool_call_id"`
+	Questions  []QuestionItem `json:"questions"`
+}
+
+type QuestionResponse struct {
+	RequestID string            `json:"request_id"`
+	Answers   map[string]string `json:"answers"`
+}
+
+// ----------------------------------------------------------------------------
+// Wire 1.5 — Plan Mode & Steer
+// ----------------------------------------------------------------------------
+
+type SteerInput struct {
+	UserInput Content `json:"user_input"`
+}
+
+// ----------------------------------------------------------------------------
+// Wire 1.7 — Hooks
+// ----------------------------------------------------------------------------
+
+type HookAction string
+
+const (
+	HookActionAllow HookAction = "allow"
+	HookActionBlock HookAction = "block"
+)
+
+type HookSubscription struct {
+	ID      string `json:"id"`
+	Event   string `json:"event"`
+	Matcher string `json:"matcher,omitempty"`
+	// Timeout in seconds, zero = server default.
+	Timeout int `json:"timeout,omitempty"`
+}
+
+type HooksInfo struct {
+	SupportedEvents []string       `json:"supported_events"`
+	Configured      map[string]int `json:"configured"`
+}
+
+type HookTriggered struct {
+	Event     string `json:"event"`
+	Target    string `json:"target"`
+	HookCount int    `json:"hook_count"`
+}
+
+type HookResolved struct {
+	Event      string     `json:"event"`
+	Target     string     `json:"target"`
+	Action     HookAction `json:"action"`
+	Reason     string     `json:"reason"`
+	DurationMs int        `json:"duration_ms"`
+}
+
+type HookRequest struct {
+	Responder      `json:"-"`
+	ID             string         `json:"id"`
+	SubscriptionID string         `json:"subscription_id"`
+	Event          string         `json:"event"`
+	Target         string         `json:"target"`
+	InputData      map[string]any `json:"input_data"`
+}
+
+type HookResponse struct {
+	RequestID string     `json:"request_id"`
+	Action    HookAction `json:"action"`
+	Reason    string     `json:"reason,omitempty"`
+}
+
+// ----------------------------------------------------------------------------
+// Parse error event — emitted internally when the SDK cannot decode a payload.
+// ----------------------------------------------------------------------------
+
+type ParseError struct {
+	Code    string           `json:"code"`
+	Message string           `json:"message"`
+	Raw     Optional[string] `json:"raw,omitzero"`
 }
