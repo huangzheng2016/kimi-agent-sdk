@@ -101,17 +101,26 @@ func (t *Turn) traverse(incoming <-chan wire.Message, steps chan<- *Step) {
 			t.resultPointer.Store(&wire.PromptResult{Status: wire.PromptResultStatusUnexpectedEOF})
 		}
 	}()
-	select {
-	case msg, ok := <-incoming:
-		if !ok {
+	// Wire 1.7+: the cli may emit pre-turn informational events (notably
+	// HookTriggered for UserPromptSubmit hooks configured on the cli side)
+	// before TurnBegin. Drain those until TurnBegin arrives, otherwise we
+	// blow up with ErrTurnNotFound on the first hook-fire notification.
+drainPreTurn:
+	for {
+		select {
+		case msg, ok := <-incoming:
+			if !ok {
+				return
+			}
+			if _, is := msg.(wire.TurnBegin); is {
+				break drainPreTurn
+			}
+			// Non-TurnBegin event before the turn opens. We have no Step
+			// channel yet to forward it on, so silently drop it — matches
+			// what the upstream loop would do for unknown messages.
+		case <-t.current.Done():
 			return
 		}
-		if _, is := msg.(wire.TurnBegin); !is {
-			t.errorPointer.Store(&ErrTurnNotFound)
-			return
-		}
-	case <-t.current.Done():
-		return
 	}
 	for msg := range incoming {
 		switch x := msg.(type) {
