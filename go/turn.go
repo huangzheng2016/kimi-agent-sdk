@@ -97,7 +97,7 @@ func (t *Turn) traverse(incoming <-chan wire.Message, steps chan<- *Step) {
 		if outgoing != nil {
 			close(outgoing)
 		}
-		if t.wireProtocolVersion >= "1.2" && !turnEnd {
+		if wireAtLeast(t.wireProtocolVersion, "1.2") && !turnEnd {
 			t.resultPointer.Store(&wire.PromptResult{Status: wire.PromptResultStatusUnexpectedEOF})
 		}
 	}()
