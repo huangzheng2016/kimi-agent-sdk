@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -125,7 +126,7 @@ func NewSession(options ...Option) (*Session, error) {
 		cancel()
 		return nil, err
 	}
-	if wireProtocolVersion >= "1.1" {
+	if wireAtLeast(wireProtocolVersion, "1.1") {
 		var toolDefs []wire.ExternalTool
 		for _, tool := range opt.tools {
 			toolDefs = append(toolDefs, tool.def)
@@ -587,6 +588,42 @@ func (tc *turnConstructor) Construct(
 		exit,
 		tc.session,
 	)
+}
+
+// wireAtLeast reports whether wire protocol version `have` is at least
+// `want`. Both are dot-separated numeric strings (e.g. "1.2", "1.10").
+//
+// String comparison breaks at minor>=10 because "1.10" < "1.2" lexically.
+// Compare numerically, segment by segment. Non-numeric or malformed parts
+// fall back to string compare so unknown formats remain conservative.
+func wireAtLeast(have, want string) bool {
+	hp := strings.Split(have, ".")
+	wp := strings.Split(want, ".")
+	n := len(hp)
+	if len(wp) > n {
+		n = len(wp)
+	}
+	for i := 0; i < n; i++ {
+		hs, ws := "0", "0"
+		if i < len(hp) {
+			hs = hp[i]
+		}
+		if i < len(wp) {
+			ws = wp[i]
+		}
+		hn, herr := strconv.Atoi(hs)
+		wn, werr := strconv.Atoi(ws)
+		if herr != nil || werr != nil {
+			if hs == ws {
+				continue
+			}
+			return hs >= ws
+		}
+		if hn != wn {
+			return hn > wn
+		}
+	}
+	return true
 }
 
 func getWireProtocolVersion(executable string) (string, error) {

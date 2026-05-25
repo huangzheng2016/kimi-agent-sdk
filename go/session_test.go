@@ -330,3 +330,31 @@ func TestStdio_Close(t *testing.T) {
 		t.Error("expected read to fail after close")
 	}
 }
+
+func TestWireAtLeast(t *testing.T) {
+	cases := []struct {
+		have, want string
+		expect     bool
+	}{
+		{"1.0", "1.1", false},
+		{"1.1", "1.1", true},
+		{"1.2", "1.1", true},
+		// 关键 case：纯字符串比较下 "1.10" < "1.2"，必须按数字段比较。
+		{"1.10", "1.2", true},
+		{"1.10", "1.9", true},
+		{"1.9", "1.10", false},
+		{"2", "1.10", true},
+		{"1", "1.0", true},
+		{"1.0", "1", true},
+		{"1.0.1", "1.0", true},
+		// 非数字段保守回退到字符串比较。
+		{"a.b", "a.b", true},
+		{"a.b", "a.c", false},
+	}
+	for _, c := range cases {
+		if got := wireAtLeast(c.have, c.want); got != c.expect {
+			t.Errorf("wireAtLeast(%q,%q)=%v, want %v", c.have, c.want, got, c.expect)
+		}
+	}
+}
+
