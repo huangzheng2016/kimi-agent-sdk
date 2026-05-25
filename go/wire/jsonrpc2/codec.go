@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/rpc"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +17,23 @@ import (
 )
 
 const JSONRPC2Version = "2.0"
+
+// wireDebug, when set via KIMI_SDK_WIRE_DEBUG=1, dumps every decoded inbound
+// payload and every outbound payload to stderr. Used to chase protocol-shape
+// mismatches against new kimi cli versions; off in production.
+var wireDebug = os.Getenv("KIMI_SDK_WIRE_DEBUG") == "1"
+
+func wireLog(direction string, payload *Payload) {
+	if !wireDebug || payload == nil {
+		return
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[wire %s] marshal err: %v\n", direction, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[wire %s] %s\n", direction, string(b))
+}
 
 func NewCodec(rwc io.ReadWriteCloser, options ...CodecOption) *Codec {
 	donectx, cancel := context.WithCancel(context.Background())
@@ -241,6 +260,7 @@ func (c *Codec) send() {
 			}
 			payload = out
 		}
+		wireLog("send", payload)
 		if err := c.enc.Encode(payload); err != nil {
 			c.cancel()
 			c.err.CompareAndSwap(nil, &wraperror{err})
@@ -369,6 +389,7 @@ func (c *Codec) recv() {
 			c.err.CompareAndSwap(nil, &wraperror{err})
 			return
 		}
+		wireLog("recv", payload)
 		if payload != nil {
 			if payload.Stream > StreamOpen {
 				c.receiverlock.RLock()
